@@ -1,0 +1,661 @@
+ ▐▛███▛█   Claude Code v2.1.325
+▝▜██████▀  Opus 5.5 · Claude Pro
+ ▝▝   ▝▝   ~/github/onfly-desafio
+
+
+❯ Leia o arquivo @README.md que tem as descrições do desafio técnico desse      
+  repositório. Na ordem de processamento com as etapas "ler → converter tipos → 
+  contar status → filtrar CONFIRMED → agregar" em qual arquivo do repositório   
+  @src/ está sendo executada cada uma das etapas?                               
+  ⎿  Read README.md (243 lines)
+  ⎿  Listed directory src/
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● O ReportBuilder.build() em src/onfly_report/services/report_builder.py:40
+  coordena as cinco etapas. Cada uma chama um módulo próprio ou roda dentro do
+  próprio build():
+
+  Etapa: 1. Ler
+  Onde é chamada (report_builder.py): :42 → self._reservation_repository.read()
+  e
+    :43 → self._rate_repository.read()
+  Onde está implementada: repositories/csv_reservation_repository.py:36
+    (CsvReservationRepository.read, devolve RawRow) e
+    repositories/csv_rate_repository.py:20 (CsvRateRepository.read, devolve
+    dict[moeda, Decimal])
+  ────────────────────────────────────────
+  Etapa: 2. Converter tipos
+  Onde é chamada (report_builder.py): :42 → parser.parse(raw) para cada linha
+  Onde está implementada: services/row_parser.py:19 (RowParser.parse: RawRow →
+    Reservation, com date, int e Decimal)
+  ────────────────────────────────────────
+  Etapa: 3. Contar status
+  Onde é chamada (report_builder.py): :45-47, laço que preenche status_counts
+  Onde está implementada: Implementada no próprio report_builder.py
+  ────────────────────────────────────────
+  Etapa: 4. Filtrar CONFIRMED
+  Onde é chamada (report_builder.py): :49 → [row for row in reservations if 
+    is_billable(row.status)]
+  Onde está implementada: services/status_policy.py:6 (is_billable)
+  ────────────────────────────────────────
+  Etapa: 5. Agregar
+  Onde é chamada (report_builder.py): :58-100: totais, by_month, top_hotels e
+    média
+  Onde está implementada: Laço em report_builder.py:61-75, que chama
+    services/stay_calculator.py:8 (calculate_room_nights) e
+    services/currency_converter.py:8 (convert_to_brl). A ordenação e a
+    serialização (format_money, :20) também ficam no report_builder.py
+
+  O cli.py só lê os argumentos, cria os repositórios e o ReportBuilder, grava o
+  JSON e define o código de saída. Os modelos RawRow e Reservation estão em
+  models.py.
+
+  Durante a leitura, já vi alguns trechos que contrariam as regras do README.
+  Ainda não rodei os testes para confirmar:
+  - Ler: csv_reservation_repository.py:47 interrompe a leitura depois de 200
+    linhas.
+  - Filtrar: status_policy.py:8 usa status != "CANCELLED", então as reservas
+    NO_SHOW passam como faturáveis.
+  - Agregar:
+    - stay_calculator.py:10 subtrai .day em vez de (checkout - checkin).days, o
+      que quebra na virada de mês ou de ano.
+    - currency_converter.py:11 divide pela taxa em vez de multiplicar e passa os
+      valores por float.
+    - report_builder.py:91 ordena top_hotels em ordem crescente, quando deveria
+      ser decrescente por valor com desempate por hotel_id ascendente.
+
+  Se quiser, rodo o pytest para confirmar esses pontos e começo as correções.
+
+✻ Crunched for 17s · done 17:42
+
+❯ Eu já rodei o pytest, que retorna "                                           
+  FAILED tests/test_currency.py::test_currency_conversion_to_brl -              
+  AssertionError: assert '118.45' == '642.00'                                   
+  FAILED tests/test_nights.py::test_nights_across_month_boundary - assert -28   
+  == 3                                                                          
+  FAILED tests/test_regression_report.py::test_regression_report_on_sample -    
+  AssertionError: assert {'average_nig...ions': 0, ...} ==                      
+  {'average_nig...ions': 0, ...}                                                
+  FAILED                                                                        
+  tests/test_status_rules.py::test_status_rules_exclude_cancelled_and_no_show - 
+  AssertionError: assert '120.00' == '100.00'                                   
+  FAILED tests/test_top_hotels.py::test_top_hotels_are_ranked_descending -      
+  AssertionError: assert ['H04', 'H03', 'H02'] == ['H01', 'H02', 'H03']         
+  5 failed in 0.37s                                                             
+  ". Enumere os trechos equivocados que você identificou.                       
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Encontrei 6 trechos errados. Os 5 primeiros explicam as 5 falhas do seu
+  pytest. O sexto nenhum teste pega, mas ele muda o relatório gerado com o
+  arquivo de dados principal.
+
+  1. A conversão de câmbio divide em vez de multiplicar e passa por float
+
+  src/onfly_report/services/currency_converter.py:11
+  return Decimal(str(float(amount) / float(rate)))
+  - Regra: amount * rate_to_brl, sempre com Decimal.
+  - Teste: test_currency_conversion_to_brl. O certo seria 100 BRL + 100 USD ×
+    5,42 = 642.00. O código calcula 100 + 100 / 5,42 = 118.45.
+  - Correção: return amount * rates[currency].
+
+  2. As noites são calculadas subtraindo só o dia do mês
+
+  src/onfly_report/services/stay_calculator.py:10
+  return (checkout.day - checkin.day) * rooms
+  - Regra: (checkout_date - checkin_date).days * rooms, inclusive na virada de
+    mês ou de ano.
+  - Teste: test_nights_across_month_boundary. Com check-in em 31/01 e check-out
+    em 03/02, o código faz 3 − 31 = -28, quando o certo é 3.
+  - Correção: return (checkout - checkin).days * rooms.
+
+  3. A regra de status deixa NO_SHOW entrar como faturável
+
+  src/onfly_report/services/status_policy.py:8
+  return status != "CANCELLED"
+  - Regra: só CONFIRMED é faturável.
+  - Teste: test_status_rules_exclude_cancelled_and_no_show. O valor da reserva
+    NO_SHOW entra na soma (120.00 em vez de 100.00).
+  - Correção: return status == "CONFIRMED".
+
+  4. O ranking de top_hotels está em ordem crescente
+
+  src/onfly_report/services/report_builder.py:91
+  ranked_hotels = sorted(hotels.items(), key=lambda item: (item[1]["amount"],
+  item[0]))
+  - Regra: total_brl decrescente, com empate desfeito por hotel_id crescente.
+  - Teste: test_top_hotels_are_ranked_descending. Sai ['H04', 'H03', 'H02'] em
+    vez de ['H01', 'H02', 'H03'].
+  - Correção: key=lambda item: (-item[1]["amount"], item[0]). Só trocar para
+    reverse=True não basta, porque isso também inverteria o desempate.
+
+  5. O teste da amostra falha por causa dos defeitos 1 a 4 juntos
+
+  test_regression_report_on_sample compara o relatório completo de
+  exemplo-validacao.csv com o esperado. Ele não aponta um trecho novo: falha
+  porque câmbio, noites, status e ranking estão errados ao mesmo tempo. Deve
+  passar quando os quatro forem corrigidos.
+
+  6. A leitura para em 200 linhas (nenhum teste pega)
+
+  src/onfly_report/repositories/csv_reservation_repository.py:47-48
+  if len(rows) == 200:
+      break
+  - Regra: total_reservations é o número de reservas no arquivo.
+  - Efeito: data/reservas_hoteis.csv tem 300 reservas (301 linhas com o
+    cabeçalho), então as últimas 100 são descartadas sem aviso. Todas as
+    contagens, totais, by_month e top_hotels do relatório principal saem
+    errados.
+  - Por que nenhum teste falha: os testes usam no máximo as 12 reservas da
+    amostra.
+  - Correção: remover o if/break. Vale adicionar um teste com mais de 200 linhas
+    para cobrir esse caso.
+
+  Os demais trechos que li seguem as regras do README: parse com Decimal e date,
+  contagem de status antes do filtro, by_month em ordem crescente pelo mês do
+  check-in, arredondamento half-up só na serialização, média "0.00" sem noites e
+  offset -03:00.
+
+  Se quiser, aplico as correções, adiciono o teste do limite de linhas e rodo o
+  pytest de novo.
+
+✻ Baked for 25s · done 17:46
+
+❯ Vamos buscar executar as correções uma por uma, primeiro pros testes de       
+  amostra. Para o item 1, conversão de câmbio, corrija a operação no services e 
+  adicione um teste para a conversão euro-reais no diretório @tests/            
+  ⎿  Listed directory tests/
+
+  Read 2 files (ctrl+o to expand)
+
+● Update(src/onfly_report/services/currency_converter.py)
+  ⎿  Added 2 lines, removed 3 lines
+       6  
+       7  
+       8  def convert_to_brl(amount: Decimal, currency: str, rates: dict[
+          str, Decimal]) -> Decimal:
+       9 -    """Converte um valor na moeda informada para BRL usando a t
+         -axa da tabela."""                                              
+      10 -    rate = rates[currency]                                     
+      11 -    return Decimal(str(float(amount) / float(rate)))           
+       9 +    """Converte um valor na moeda informada para BRL: ``amount 
+         +* rate_to_brl``, em Decimal exato."""                          
+      10 +    return amount * rates[currency]                            
+
+● Write(tests/test_currency_eur.py)
+  ⎿  Wrote 35 lines to tests/test_currency_eur.py
+      1 """Testes adicionais: conversão EUR -> BRL."""
+      2 
+      3 from decimal import Decimal
+      4 
+      5 from helpers import run_cli
+      6 
+      7 from onfly_report.services.currency_converter import convert_to_b
+        rl
+      8 
+      9 RATES = {"BRL": Decimal("1.000000"), "USD": Decimal("5.420000"), 
+     … +27 lines (~1 KB) (ctrl+o to expand)
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● Corrigi o câmbio e o teste dele já passa. Um resultado me surpreendeu: o teste
+  da amostra também passou, mesmo com os outros defeitos ainda no código. Vou
+  ver por quê.
+
+  Read 1 file (ctrl+o to expand)
+
+● O câmbio está corrigido. O pytest agora dá 5 aprovados e 3 falhas, e as 3
+  falhas são dos itens que ainda faltam corrigir.
+
+  Correção. Em src/onfly_report/services/currency_converter.py, a função agora
+  multiplica pela taxa e usa só Decimal, sem passar por float:
+  return amount * rates[currency]
+
+  Teste novo. Criei o arquivo tests/test_currency_eur.py para a conversão de
+  euro para real, sem mexer nos testes fornecidos. Ele tem 3 testes:
+  - test_eur_conversion_multiplies_by_rate: 150 EUR × 5,88 = 882.00, o mesmo
+    valor do hotel H09 na amostra de validação.
+  - test_eur_conversion_is_exact_decimal: 19,99 × 5,88 dá exatamente
+    Decimal("117.5412"). Esse teste pegaria qualquer volta do float.
+  - test_eur_conversion_in_report: roda o CLI com 100 BRL + 2 × 19,99 EUR. O
+    total exato é 335,0824, e o relatório deve mostrar "335.08", arredondado só
+    na serialização.
+
+  Resultado do pytest:
+  - Passaram: test_currency_conversion_to_brl, test_regression_report_on_sample
+    e os 3 testes novos.
+  - Ainda falham:
+    - test_nights_across_month_boundary (item 2)
+    - test_status_rules_exclude_cancelled_and_no_show (item 3)
+    - test_top_hotels_are_ranked_descending (item 4)
+
+  Errei sobre o teste da amostra. Antes eu disse que
+  test_regression_report_on_sample falhava pelos itens 1 a 4 juntos. Na verdade
+  ele só pegava o câmbio. As reservas desse teste não atravessam o fim do mês,
+  não têm NO_SHOW e ele só confere o summary, sem olhar o ranking. Por isso já
+  passa. A amostra completa do README, data/exemplo-validacao.csv, cobre os
+  outros casos, e vale conferi-la de novo no final.
+
+  Ambiente de testes. A .venv do projeto não tem o pytest instalado. Rodei com o
+  pytest do miniconda, em Python 3.13. Para validar em 3.11, como o desafio
+  pede, é preciso rodar pip install -r requirements-dev.txt dentro da .venv.
+
+  Quer que eu siga para o item 2, o cálculo das noites?
+
+✻ Sautéed for 36s · done 17:59
+
+※ recap: Você está corrigindo os defeitos do CLI do desafio Onfly. O câmbio já foi corrigido, com testes de EUR, e restam 3 testes falhando. O próximo passo é corrigir o cálculo das noites (item 2), quando você aprovar. (disable recaps in /config)
+
+❯ Boa, a venv não estava ativada, agora está. O resultado do pytest "           
+  FAILED tests/test_nights.py::test_nights_across_month_boundary - assert -28   
+  == 3                                                                          
+  FAILED                                                                        
+  tests/test_status_rules.py::test_status_rules_exclude_cancelled_and_no_show - 
+  AssertionError: assert '120.00' == '100.00'                                   
+  FAILED tests/test_top_hotels.py::test_top_hotels_are_ranked_descending -      
+  AssertionError: assert ['H04', 'H03', 'H02'] == ['H01', 'H02', 'H03']         
+  3 failed, 5 passed in 0.44s                                                   
+  " confirma o que você pontuou em relação ao test_regression. Agora vamos      
+  corrigir o item 2, e adicione um teste para a virada do ano.                  
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(src/onfly_report/services/stay_calculator.py)
+  ⎿  Added 1 line, removed 1 line
+       7  
+       8  def calculate_room_nights(checkin: date, checkout: date, rooms:
+           int) -> int:
+       9      """Calcula noites de quarto: diferença de dias (não inclusi
+          va) vezes quartos."""
+      10 -    return (checkout.day - checkin.day) * rooms                
+      10 +    return (checkout - checkin).days * rooms                   
+
+● Write(tests/test_nights_year_boundary.py)
+  ⎿  Wrote 33 lines to tests/test_nights_year_boundary.py
+       1 """Testes adicionais: noites de quarto na virada de ano."""
+       2 
+       3 from datetime import date
+       4 
+       5 from helpers import run_cli
+       6 
+       7 from onfly_report.services.stay_calculator import calculate_room
+         _nights
+       8 
+       9 
+     … +24 lines (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● O cálculo das noites está corrigido e o pytest na .venv (Python 3.11.18) dá 8 
+  aprovados e 2 falhas.
+
+  Correção. Em src/onfly_report/services/stay_calculator.py, o cálculo agora
+  subtrai as datas inteiras, e não só o dia do mês:
+  return (checkout - checkin).days * rooms
+
+  Teste novo. Criei o arquivo tests/test_nights_year_boundary.py com 2 testes
+  para a virada do ano:
+  - test_calculate_room_nights_across_year_boundary: testa a função direto. De
+    30/12/2024 a 02/01/2025 são 3 noites, e com 2 quartos dá 6.
+  - test_nights_across_year_boundary_in_report: roda o CLI com essa mesma
+    reserva, de valor R$ 600,00. Ele confere 3 coisas:
+    - total_room_nights é 6;
+    - average_nightly_rate_brl é "100.00";
+    - by_month tem uma única entrada, em "2024-12", porque a regra usa o mês do
+      check-in mesmo quando a estadia termina no ano seguinte.
+
+  Resultado do pytest:
+  - Passaram: test_nights_across_month_boundary e os 2 testes novos, além dos 5
+    que já passavam.
+  - Ainda falham:
+    - test_status_rules_exclude_cancelled_and_no_show (item 3)
+    - test_top_hotels_are_ranked_descending (item 4)
+
+  Quer que eu siga para o item 3, a regra de status?
+
+✻ Worked for 16s · done 18:09
+
+※ recap: Estamos corrigindo os defeitos do CLI até o pytest passar. Câmbio e noites já estão corrigidos, com 8 testes aprovados e 2 falhando. O próximo passo é corrigir a regra de status para que só CONFIRMED seja faturável. (disable recaps in /config)
+
+❯ Sim, e creio que não necessite de testes adicionais                           
+
+● Update(src/onfly_report/services/status_policy.py)
+  ⎿  Added 1 line, removed 1 line
+      5  
+      6  def is_billable(status: str) -> bool:
+      7      """Indica se a reserva entra nos totais financeiros e de noi
+         tes."""
+      8 -    return status != "CANCELLED"                                
+      8 +    return status == "CONFIRMED"                                
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● A regra de status está corrigida e o pytest dá 9 aprovados e 1 falha.
+
+  Correção. Em src/onfly_report/services/status_policy.py, só CONFIRMED conta
+  como faturável. Antes, tudo que não fosse CANCELLED passava, inclusive
+  NO_SHOW:
+  return status == "CONFIRMED"
+
+  Concordo que não precisa de teste novo. O
+  test_status_rules_exclude_cancelled_and_no_show, que agora passa, já cobre
+  CANCELLED e NO_SHOW juntos.
+
+  A falha que resta é test_top_hotels_are_ranked_descending, o item 4 (ordem do
+  ranking). Sigo para ele?
+✻ Cooked for 7s · done 18:15
+
+❯ Sim, corrija o item 4, e adiciona um teste que faça a validação do desempate  
+  por id                                                                        
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(src/onfly_report/services/report_builder.py)
+  ⎿  Added 2 lines, removed 1 line
+      88              for month, data in sorted(monthly.items())
+      89          ]
+      90  
+      91 -        ranked_hotels = sorted(hotels.items(), key=lambda item:
+         - (item[1]["amount"], item[0]))                                 
+      91 +        # total_brl decrescente; empate por hotel_id ascendente
+         +.                                                              
+      92 +        ranked_hotels = sorted(hotels.items(), key=lambda item:
+         + (-item[1]["amount"], item[0]))                                
+      93          top_hotels = [
+      94              {
+      95                  "hotel_id": hotel_id,
+
+● Write(tests/test_top_hotels_tiebreak.py)
+  ⎿  Wrote 35 lines to tests/test_top_hotels_tiebreak.py
+       1 """Testes adicionais: desempate do ranking de hotéis por hotel_i
+         d."""
+       2 
+       3 from helpers import run_cli
+       4 
+       5 
+       6 def test_top_hotels_tie_is_broken_by_hotel_id_ascending(tmp_path
+         ):
+       7     """Valores iguais ficam em hotel_id ascendente, independente
+          da ordem no arquivo.
+     … +28 lines (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Todos os testes passam. Vou rodar o CLI na amostra de validação do README para
+  conferir os números.
+
+● Bash(source .venv/bin/activate && PYTHONPATH=src python -m onfly_report
+      --input data/exemplo-validacao.csv --rates data/taxas_cambio.csv --output
+      output/exemplo.json…)
+  ⎿  Reservas: 12 | Confirmadas: 9 | Noites: 28 | Total BRL: 7566.00
+     {
+       "report_version": "1.0",
+     … +57 lines (ctrl+o to expand)
+  ⎿  Updated output/exemplo.json (+27 -27)
+       1  {
+       2    "report_version": "1.0",
+       3 -  "generated_at": "2026-11-15T18:02:56-03:00",                 
+       3 +  "generated_at": "2026-11-15T18:19:12-03:00",                 
+       4    "summary": {
+       5      "total_reservations": 12,
+       6      "confirmed_reservations": 9,
+       7      "cancelled_reservations": 2,
+       8      "no_show_reservations": 1,
+       9 -    "total_room_nights": -33,                                  
+      10 -    "total_amount_brl": "7866.00",                             
+      11 -    "average_nightly_rate_brl": "0.00"                         
+       9 +    "total_room_nights": 28,                                   
+      10 +    "total_amount_brl": "7566.00",                             
+      11 +    "average_nightly_rate_brl": "270.21"                       
+      12    },
+      13    "by_month": [
+      14      {
+      15        "month": "2025-01",
+      16 -      "reservations": 9,                                       
+      17 -      "room_nights": -36,                                      
+      18 -      "total_brl": "6984.00"                                   
+      16 +      "reservations": 8,                                       
+      17 +      "room_nights": 25,                                       
+      18 +      "total_brl": "6684.00"                                   
+      19      },
+      20      {
+      21        "month": "2025-02",
+     ...
+      26    ],
+      27    "top_hotels": [
+      28      {
+      29 -      "hotel_id": "H05",                                       
+      30 -      "hotel_name": "Hotel Recife Plaza",                      
+      31 -      "room_nights": 1,                                        
+      32 -      "total_brl": "300.00"                                    
+      29 +      "hotel_id": "H01",                                       
+      30 +      "hotel_name": "Hotel Aurora Paulista",                   
+      31 +      "room_nights": 3,                                        
+      32 +      "total_brl": "1200.00"                                   
+      33      },
+     … 42 more lines (ctrl+o to expand)
+
+● O ranking de hotéis está corrigido e o pytest agora dá 12 aprovados, 0 falhas.
+
+  Correção. Em src/onfly_report/services/report_builder.py:91, a ordenação agora
+  usa o valor negado, para ficar decrescente, e o hotel_id normal para
+  desempatar em ordem crescente:
+  ranked_hotels = sorted(hotels.items(), key=lambda item: (-item[1]["amount"],
+  item[0]))
+  Usar só reverse=True deixaria o maior valor primeiro, mas também inverteria o
+  desempate.
+
+  Teste novo. Criei o arquivo tests/test_top_hotels_tiebreak.py com 2 testes:
+  - test_top_hotels_tie_is_broken_by_hotel_id_ascending: H01, H02 e H03 empatam
+    em R$ 500 e aparecem fora de ordem no arquivo. H04 vale R$ 900 e --top é 3,
+    então o corte cai no meio do empate. O resultado esperado é ["H04", "H01", 
+    "H02"]. Com reverse=True sairia H03 e H02, e o teste falharia.
+  - test_top_hotels_tie_after_currency_conversion: 100 USD convertidos (R$ 542)
+    empatam exatamente com R$ 542. O teste confere que H01 fica na frente de
+    H02.
+
+  Amostra do README. Rodei o CLI em data/exemplo-validacao.csv. O resultado bate
+  com todas as tabelas esperadas:
+  - Resumo: 12 reservas, 9 confirmadas, 2 canceladas, 1 no-show, 28 noites, R$
+    7566.00 de total e R$ 270.21 de média.
+  - Por mês: 2025-01 com 8 reservas, 25 noites e R$ 6684.00; 2025-02 com 1
+    reserva, 3 noites e R$ 882.00.
+  - Ranking: H01, H02, H12, H10, H09, com os mesmos valores do README.
+
+  Falta corrigir o item 6. O
+  src/onfly_report/repositories/csv_reservation_repository.py:47 ainda para a
+  leitura em 200 linhas. Nenhum teste nem a amostra pegam isso, mas o relatório
+  principal, gerado a partir de data/reservas_hoteis.csv (300 reservas), perde
+  as últimas 100. Quer que eu corrija esse item agora e adicione um teste com
+  mais de 200 linhas?
+
+✻ Cogitated for 26s · done 18:19
+
+❯ Sim, faça ambas as coisas, e forneça o resultado esperado após executar o CLI 
+  sobre o @data/reservas_hoteis.csv.                                            
+
+● Update(src/onfly_report/repositories/csv_reservation_repository.py)
+  ⎿  Added 1 line, removed 6 lines
+      41                  if missing:
+      42                      raise InputFileError(f"colunas obrigatórias
+           ausentes: {', '.join(missing)}")
+      43  
+      44 -                rows: list[RawRow] = []                        
+      45 -                for values in reader:                          
+      46 -                    rows.append(RawRow(line_number=reader.line_
+         -num, values=values))                                           
+      47 -                    if len(rows) == 200:                       
+      48 -                        break                                  
+      49 -                return rows                                    
+      44 +                return [RawRow(line_number=reader.line_num, val
+         +ues=values) for values in reader]                              
+      45          except FileNotFoundError as err:
+      46              raise InputFileError(f"arquivo de reservas não enco
+          ntrado: {self._path}") from err
+      47          except (OSError, csv.Error) as err:
+
+● Write(tests/test_reads_all_rows.py)
+  ⎿  Wrote 26 lines to tests/test_reads_all_rows.py
+       1 """Testes adicionais: o CLI lê todas as linhas do arquivo, sem l
+         imite."""
+       2 
+       3 from helpers import run_cli
+       4 
+       5 
+       6 def test_reads_more_than_200_rows(tmp_path):
+       7     """total_reservations = número de reservas no arquivo, mesmo
+          acima de 200."""
+       8     total = 250
+     … +18 lines (ctrl+o to expand)
+
+● Bash(source .venv/bin/activate && python -m pytest -q 2>&1 | tail -3 && cat
+      data/taxas_cambio.csv && cut -d, -f11,12 data/reservas_hoteis.csv | sort |
+      uniq -c && PYT…)
+  ⎿  ..............
+        [100%]
+     14 passed in 0.77s
+     … +110 lines (ctrl+o to expand)
+  ⎿  Created output/report.json (+89 -0)
+       1 +{                                                              
+       2 +  "report_version": "1.0",                                     
+       3 +  "generated_at": "2026-11-15T18:23:11-03:00",                 
+       4 +  "summary": {                                                 
+       5 +    "total_reservations": 300,                                 
+       6 +    "confirmed_reservations": 235,                             
+       7 +    "cancelled_reservations": 31,                              
+       8 +    "no_show_reservations": 34,                                
+       9 +    "total_room_nights": 1347,                                 
+      10 +    "total_amount_brl": "396170.00",                           
+      11 +    "average_nightly_rate_brl": "294.11"                       
+      12 +  },                                                           
+      13 +  "by_month": [                                                
+      14 +    {                                                          
+      15 +      "month": "2024-12",                                      
+      16 +      "reservations": 35,                                      
+      17 +      "room_nights": 174,                                      
+      18 +      "total_brl": "61335.80"                                  
+      19 +    },                                                         
+      20 +    {                                                          
+      21 +      "month": "2025-01",                                      
+      22 +      "reservations": 37,                                      
+      23 +      "room_nights": 235,                                      
+      24 +      "total_brl": "64662.89"                                  
+      25 +    },                                                         
+      26 +    {                                                          
+      27 +      "month": "2025-02",                                      
+      28 +      "reservations": 26,                                      
+      29 +      "room_nights": 138,                                      
+      30 +      "total_brl": "45991.09"                                  
+      31 +    },                                                         
+      32 +    {                                                          
+      33 +      "month": "2025-03",                                      
+      34 +      "reservations": 39,                                      
+      35 +      "room_nights": 215,                                      
+      36 +      "total_brl": "65984.99"                                  
+      37 +    },                                                         
+      38 +    {                                                          
+      39 +      "month": "2025-04",                                      
+      40 +      "reservations": 21,                                      
+     … 49 more lines (ctrl+o to expand)
+
+● Testes passam (14). Agora vou recalcular o relatório com um script
+  independente, que não usa o código do CLI, para confirmar os números e checar
+  se os dados têm alguma armadilha.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● O limite de 200 linhas foi removido e o pytest dá 14 aprovados, 0 falhas.
+
+  Correção. Em src/onfly_report/repositories/csv_reservation_repository.py, o
+  laço com if len(rows) == 200: break foi trocado por uma leitura de todas as
+  linhas:
+  return [RawRow(line_number=reader.line_num, values=values) for values in
+  reader]
+
+  Teste novo. Criei o arquivo tests/test_reads_all_rows.py com 2 testes:
+  - test_reads_more_than_200_rows: lê 250 reservas e confere 250 no total, 250
+    confirmadas, 250 noites e "2500.00".
+  - test_last_row_after_200_is_counted: a única reserva CANCELLED está na
+    linha 201. Com o código antigo ela seria descartada, e
+    cancelled_reservations daria 0.
+
+  Resultado esperado para data/reservas_hoteis.csv
+
+  O comando gera output/report.json e imprime no stdout:
+  Reservas: 300 | Confirmadas: 235 | Noites: 1347 | Total BRL: 396170.00
+
+  ┌──────────────────────────┬───────────┐
+  │          Campo           │   Valor   │
+  ├──────────────────────────┼───────────┤
+  │ total_reservations       │ 300       │
+  ├──────────────────────────┼───────────┤
+  │ confirmed_reservations   │ 235       │
+  ├──────────────────────────┼───────────┤
+  │ cancelled_reservations   │ 31        │
+  ├──────────────────────────┼───────────┤
+  │ no_show_reservations     │ 34        │
+  ├──────────────────────────┼───────────┤
+  │ total_room_nights        │ 1347      │
+  ├──────────────────────────┼───────────┤
+  │ total_amount_brl         │ 396170.00 │
+  ├──────────────────────────┼───────────┤
+  │ average_nightly_rate_brl │ 294.11    │
+  └──────────────────────────┴───────────┘
+
+  ┌─────────┬──────────────┬─────────────┬───────────┐
+  │  month  │ reservations │ room_nights │ total_brl │
+  ├─────────┼──────────────┼─────────────┼───────────┤
+  │ 2024-12 │ 35           │ 174         │ 61335.80  │
+  ├─────────┼──────────────┼─────────────┼───────────┤
+  │ 2025-01 │ 37           │ 235         │ 64662.89  │
+  ├─────────┼──────────────┼─────────────┼───────────┤
+  │ 2025-02 │ 26           │ 138         │ 45991.09  │
+  ├─────────┼──────────────┼─────────────┼───────────┤
+  │ 2025-03 │ 39           │ 215         │ 65984.99  │
+  ├─────────┼──────────────┼─────────────┼───────────┤
+  │ 2025-04 │ 21           │ 146         │ 31335.97  │
+  ├─────────┼──────────────┼─────────────┼───────────┤
+  │ 2025-05 │ 39           │ 196         │ 63507.98  │
+  ├─────────┼──────────────┼─────────────┼───────────┤
+  │ 2025-06 │ 38           │ 243         │ 63351.29  │
+  └─────────┴──────────────┴─────────────┴───────────┘
+
+  ┌──────────┬────────────────────────┬─────────────┬───────────┐
+  │ hotel_id │       hotel_name       │ room_nights │ total_brl │
+  ├──────────┼────────────────────────┼─────────────┼───────────┤
+  │ H06      │ Hotel Salvador Centro  │ 160         │ 45165.46  │
+  ├──────────┼────────────────────────┼─────────────┼───────────┤
+  │ H10      │ Hotel Madrid, Gran Vía │ 120         │ 45041.69  │
+  ├──────────┼────────────────────────┼─────────────┼───────────┤
+  │ H12      │ Hotel Miami Beach      │ 106         │ 41647.69  │
+  ├──────────┼────────────────────────┼─────────────┼───────────┤
+  │ H07      │ Hotel Brasília Tower   │ 148         │ 39920.52  │
+  ├──────────┼────────────────────────┼─────────────┼───────────┤
+  │ H11      │ Hotel Buenos Aires     │ 102         │ 37455.69  │
+  └──────────┴────────────────────────┴─────────────┴───────────┘
+
+  Conferência independente
+
+  Recalculei o relatório inteiro com um script separado, que não importa nada do
+  onfly_report e segue só as regras do README. O resultado bate com o
+  output/report.json em todos os campos, exceto generated_at, que muda a cada
+  execução.
+
+  O script também conferiu os dados de entrada. Nada neles atrapalha o cálculo:
+  - não há reservation_id repetido;
+  - cada hotel_id tem um único nome;
+  - não há espaços sobrando nos campos;
+  - todas as estadias têm pelo menos 1 noite;
+  - só aparecem os status CONFIRMED, CANCELLED e NO_SHOW e as moedas BRL, USD e
+    EUR, todas com taxa.
+
+  O script está em /tmp/claude-1001/-home-siriusvllos-github-onfly-desafio/87bdb
+  8b4-b896-4ee8-a496-150f3a235210/scratchpad/check.py, se quiser usá-lo como
+  referência no README-ENTREGA.
+
+  Os cinco defeitos estão corrigidos: câmbio, noites, status, ranking e limite
+  de leitura. Falta escrever o entrega/README-ENTREGA.md e, como você usou IA, a
+  declaracao.md e o export da sessão.
+
+✻ Churned for 39s · done 18:23
